@@ -1,12 +1,22 @@
 import requests
 import tqdm
+import psycopg2
+import psycopg2.errors
+
+# Database credentials. Change as needed
+DB_HOST = "Alexs-Air"
+DB_NAME = "nba"
+DB_USER = "alex"
+DB_PASS = "mariners"
 
 class Player():
     """
     Represents a player from the NBA combine. Contains important data and statistics.
     """
-    def __init__(self, player_id, height, weight, wingspan, standing_reach, vertical_leap, bench_press_reps, lane_agility_time, three_quarter_sprint_time, bmi):
+    def __init__(self, player_id, first_name, last_name, height, weight, wingspan, standing_reach, vertical_leap, bench_press_reps, lane_agility_time, three_quarter_sprint_time, bmi):
         self.player_id = player_id
+        self.first_name = first_name
+        self.last_name = last_name
         self.height = height
         self.weight = weight
         self.wingspan = wingspan
@@ -53,23 +63,27 @@ class Player():
         except TypeError:
             print("Error calculating bench press score: Bench Press data is missing")
 
-
 def get_request(year):
     """
     Calls the endpoint for the NBA combine stats and returns the JSON response.
     year: User selected year for stats
     """
-    print("Getting draft combine request ...")
-    url = "https://stats.nba.com/stats/draftcombinestats?LeagueID=00&SeasonYear=2019-20"
-    headers = {'Host': 'stats.nba.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:72.0) Gecko/20100101 Firefox/72.0', 'Accept': 'application/json, text/plain, */*', 'Accept-Language': 'en-US,en;q=0.5', 'Accept-Encoding': 'gzip, deflate, br', 'x-nba-stats-origin': 'stats', 'x-nba-stats-token': 'true', 'Connection': 'keep-alive', 'Referer': 'https://stats.nba.com/', 'Pragma': 'no-cache', 'Cache-Control': 'no-cache'}
-    resp_json = requests.get(url=url, headers=headers).json()
-    return resp_json
-
+    try:
+        print("Getting draft combine request ...")
+        url = f"https://stats.nba.com/stats/draftcombinestats?LeagueID=00&SeasonYear={year}"
+        headers = {'Host': 'stats.nba.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:72.0) Gecko/20100101 Firefox/72.0', 'Accept': 'application/json, text/plain, */*', 'Accept-Language': 'en-US,en;q=0.5', 'Accept-Encoding': 'gzip, deflate, br', 'x-nba-stats-origin': 'stats', 'x-nba-stats-token': 'true', 'Connection': 'keep-alive', 'Referer': 'https://stats.nba.com/', 'Pragma': 'no-cache', 'Cache-Control': 'no-cache'}
+        resp_json = requests.get(url=url, headers=headers).json()
+        return resp_json
+    except requests.exceptions.RequestException as e:
+        print(f"Error getting request: {e}")
+        
 def initalize_players():
-    year = 0
+    year = input("Enter the draft class (ex. 2019-20): ")
 
     # Get the response from the NBA API
     api_response = get_request(year)
+    if not api_response:
+        return None
     results = api_response['resultSets'][0]['rowSet']
     headers = api_response['resultSets'][0]['headers']
 
@@ -86,6 +100,8 @@ def initalize_players():
     print("Iterating through players from draft class ...")
     for result in tqdm.tqdm(results):
         player_id = result[headers.index('PLAYER_ID')]
+        first_name = result[headers.index('FIRST_NAME')].split()[0]
+        last_name = result[headers.index('LAST_NAME')]
         height = result[headers.index('HEIGHT_WO_SHOES')]
         weight = result[headers.index('WEIGHT')]
         wingspan = result[headers.index('WINGSPAN')]
@@ -97,7 +113,7 @@ def initalize_players():
         max_vertical_leap = result[headers.index('MAX_VERTICAL_LEAP')]
         bmi = result[headers.index('BODY_FAT_PCT')]
 
-        player = Player(player_id, height, weight, wingspan, standing_reach, vertical_leap, bench_press_reps, lane_agility_time, three_quarter_sprint_time, bmi)
+        player = Player(player_id, first_name, last_name, height, weight, wingspan, standing_reach, vertical_leap, bench_press_reps, lane_agility_time, three_quarter_sprint_time, bmi)
         players.append(player)
 
         if vertical_leap:
@@ -121,9 +137,92 @@ def initalize_players():
     for player in tqdm.tqdm(players):
         player.calculate_scores(vertical_leap_avg, three_quarter_sprint_avg, bench_press_avg)
     
+    return players
 
+def store_in_db(players):
+    """
+    Stores the player data in a PostgreSQL database
+    """
+    connection = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASS)
+    cursor = connection.cursor()
+    
+    print("Storing player data in database ...")
+    for player in tqdm.tqdm(players):
+        try:
+            cursor.execute("""
+                INSERT INTO draft_combine_stats (
+                    id,
+                    first_name,
+                    last_name,
+                    team,
+                    height,
+                    weight,
+                    wingspan,
+                    standing_reach,
+                    vertical_leap,
+                    bench_press_reps,
+                    lane_agility_time,
+                    three_quarter_sprint_time,
+                    vertical_leap_score,
+                    three_quarter_sprint_score,
+                    bench_press_score,
+                    bmi
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                    player.player_id,
+                    player.first_name,
+                    player.last_name,
+                    player.team,
+                    player.height,
+                    player.weight,
+                    player.wingspan,
+                    player.standing_reach,
+                    player.vertical_leap,
+                    player.bench_press_reps,
+                    player.lane_agility_time,
+                    player.three_quarter_sprint_time,
+                    player.vertical_leap_score,
+                    player.three_quarter_sprint_score,
+                    player.bench_press_score,
+                    player.bmi
+                ))
+            connection.commit()
+        except psycopg2.errors.UndefinedTable as e:
+            print("Table doesn't exist. Creating table ...")
+            cursor.execute("""
+                CREATE TABLE draft_combine_stats (
+                    id INTEGER PRIMARY KEY,
+                    first_name VARCHAR(50),
+                    last_name VARCHAR(50),
+                    team VARCHAR(3),
+                    height FLOAT,
+                    weight FLOAT,
+                    wingspan FLOAT,
+                    standing_reach FLOAT,
+                    vertical_leap FLOAT,
+                    bench_press_reps INTEGER,
+                    lane_agility_time FLOAT,
+                    three_quarter_sprint_time FLOAT,
+                    vertical_leap_score FLOAT,
+                    three_quarter_sprint_score FLOAT,
+                    bench_press_score FLOAT,
+                    bmi FLOAT
+                )
+            """)
+            print("Table created.")
+        except psycopg2.errors.UniqueViolation as e:
+            print(f"Player {player.player_id} already exists in the database.")
+            continue
+        except psycopg2.errors.InFailedSqlTransaction as e:
+            print("Error storing data in database.")
+            continue
+    cursor.close()
+    print("Data stored successfully.")
+    
 def main():
-    initalize_players()
+    players = initalize_players()
+    
+    store_in_db(players) if players else print("Error getting players.")
 
 
 if __name__ == "__main__":
